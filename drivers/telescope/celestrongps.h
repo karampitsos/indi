@@ -90,6 +90,7 @@ class CelestronGPS : public INDI::Telescope, public INDI::GuiderInterface, publi
         // Tracking
         virtual bool SetTrackMode(uint8_t mode) override;
         virtual bool SetTrackEnabled(bool enabled) override;
+        virtual bool SetTrackRate(double raRate, double deRate) override;
 
         // Parking
         virtual bool Park() override;
@@ -155,6 +156,12 @@ class CelestronGPS : public INDI::Telescope, public INDI::GuiderInterface, publi
     private:
         bool setCelestronTrackMode(CELESTRON_TRACK_MODE mode);
         bool checkMinVersion(double minVersion, const char *feature, bool debug = false);
+
+        // Custom tracking drives both motors at the TELESCOPE_TRACK_RATE axis rates
+        // with the mount's own tracking switched off.
+        bool startCustomTracking();
+        bool stopCustomTracking();
+        bool customTrackingActive {false};
         void checkAlignment();
 
         double currentRA, currentDEC, currentAZ, currentALT;
