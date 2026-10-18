@@ -970,7 +970,7 @@ bool CelestronDriver::is_slewing(bool *slewing)
 
 bool CelestronDriver::get_track_mode(CELESTRON_TRACK_MODE *mode)
 {
-    set_sim_response("\02#");
+    set_sim_response("%c#", sim_data.trackMode);
 
     if (!send_command("t", 1, response, 2, true, false))
         return false;

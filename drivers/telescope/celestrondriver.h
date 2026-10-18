@@ -177,7 +177,7 @@ typedef struct SimData
     double az;
     double alt;
     CELESTRON_SLEW_RATE slewRate;
-    CELESTRON_TRACK_MODE trackMode;
+    CELESTRON_TRACK_MODE trackMode = CTM_EQN;
     CELESTRON_GPS_STATUS gpsStatus;
     bool isSlewing;
     uint32_t foc_position = 20000;

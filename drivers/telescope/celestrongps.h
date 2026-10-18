@@ -162,6 +162,13 @@ class CelestronGPS : public INDI::Telescope, public INDI::GuiderInterface, publi
         bool startCustomTracking();
         bool stopCustomTracking();
         bool customTrackingActive {false};
+
+        // Simulated axis positions, the Alt-Az simulation integrates the custom rates on them
+        double simAz {0}, simAlt {0};
+        INDI::PropertySwitch SimTrackModeSP {3}; // Alt Az, EQ N, EQ S
+        INDI::IGeographicCoordinates simObserver();
+        void simAxesFromRaDec();
+
         void checkAlignment();
 
         double currentRA, currentDEC, currentAZ, currentALT;

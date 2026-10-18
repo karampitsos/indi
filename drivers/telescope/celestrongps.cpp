@@ -135,6 +135,13 @@ bool CelestronGPS::initProperties()
     IUFillSwitch(&CelestronTrackModeS[2], "MODE_EQ_S", "EQ S", ISS_OFF);
     IUFillSwitch(&CelestronTrackModeS[3], "MODE_RA_DEC", "Ra and Dec", ISS_OFF);
 
+    // In simulation the track mode of the simulated mount, in the same order as CelestronTrackModeS
+    SimTrackModeSP[0].fill("MODE_ALTAZ", "Alt Az", ISS_OFF);
+    SimTrackModeSP[1].fill("MODE_EQ_N", "EQ N", ISS_ON);
+    SimTrackModeSP[2].fill("MODE_EQ_S", "EQ S", ISS_OFF);
+    SimTrackModeSP.fill(getDeviceName(), "SIM_CELESTRON_TRACK_MODE", "Sim Track Mode", OPTIONS_TAB, IP_RW, ISR_1OFMANY, 0,
+                        IPS_IDLE);
+
     // INDI track modes are sidereal, solar and lunar
     AddTrackMode("TRACK_SIDEREAL", "Sidereal", true);
     AddTrackMode("TRACK_SOLAR", "Solar");
@@ -259,6 +266,8 @@ void CelestronGPS::ISGetProperties(const char *dev)
 
     defineProperty(&UseHibernateSP);
     defineProperty(&CelestronTrackModeSP);
+    if (isSimulation())
+        defineProperty(SimTrackModeSP);
     if (configLoaded == false)
     {
         configLoaded = true;
@@ -339,7 +348,7 @@ bool CelestronGPS::updateProperties()
                 if (isParked())
                     driver.set_sim_track_mode(CTM_OFF);
                 else
-                    driver.set_sim_track_mode(CTM_EQN);
+                    driver.set_sim_track_mode(static_cast<CELESTRON_TRACK_MODE>(SimTrackModeSP.findOnSwitchIndex() + 1));
             }
             if (driver.get_track_mode(&ctm))
             {
@@ -1089,6 +1098,17 @@ bool CelestronGPS::ISNewSwitch(const char *dev, const char *name, ISState *state
 {
     if (dev && std::string(getDeviceName()) == dev)
     {
+        // Simulated Celestron track mode
+        if (SimTrackModeSP.isNameMatch(name))
+        {
+            SimTrackModeSP.update(states, names, n);
+            SimTrackModeSP.setState(IPS_OK);
+            SimTrackModeSP.apply();
+            if (isConnected())
+                LOG_INFO("The simulated track mode takes effect when connecting.");
+            return true;
+        }
+
         // Enable/Disable hibernate
         if (name && std::string(name) == UseHibernateSP.name)
         {
@@ -1413,6 +1433,7 @@ void CelestronGPS::mountSim()
 
         driver.set_sim_ra(currentRA);
         driver.set_sim_dec(currentDEC);
+        simAxesFromRaDec();
 
         NewRaDec(currentRA, currentDEC);
 
@@ -1471,17 +1492,76 @@ void CelestronGPS::mountSim()
 
             break;
 
+        case SCOPE_TRACKING:
+            // custom tracking moves the axes at the commanded signed rates
+            if (customTrackingActive && fwInfo.celestronTrackMode == CTM_ALTAZ)
+            {
+                simAz  = range360(simAz + TrackRateNP[AXIS_RA].getValue() * dt / 3600.0);
+                simAlt = std::max(-90.0, std::min(90.0, simAlt + TrackRateNP[AXIS_DE].getValue() * dt / 3600.0));
+
+                INDI::IHorizontalCoordinates horizontal {simAz, simAlt};
+                INDI::IEquatorialCoordinates equatorial {0, 0};
+                INDI::IGeographicCoordinates observer = simObserver();
+                INDI::HorizontalToEquatorial(&horizontal, &observer, ln_get_julian_from_sys(), &equatorial);
+                currentRA  = equatorial.rightascension;
+                currentDEC = equatorial.declination;
+
+                driver.set_sim_ra(currentRA);
+                driver.set_sim_dec(currentDEC);
+                driver.set_sim_az(simAz);
+                driver.set_sim_alt(simAlt);
+                return;
+            }
+            else if (customTrackingActive)
+            {
+                // the RA axis tracks at the positive sidereal rate in the north, negative in the south
+                double direction = (fwInfo.celestronTrackMode == CTM_EQS) ? -1 : 1;
+                currentRA  = range24(currentRA + (TRACKRATE_SIDEREAL - direction * TrackRateNP[AXIS_RA].getValue()) * dt /
+                                     3600.0 / 15.0);
+                currentDEC = rangeDec(currentDEC + TrackRateNP[AXIS_DE].getValue() * dt / 3600.0);
+            }
+            break;
+
         default:
             break;
     }
 
     driver.set_sim_ra(currentRA);
     driver.set_sim_dec(currentDEC);
+    simAxesFromRaDec();
+}
+
+INDI::IGeographicCoordinates CelestronGPS::simObserver()
+{
+    return INDI::IGeographicCoordinates
+    {
+        range360(LocationNP[LOCATION_LONGITUDE].getValue()),
+        LocationNP[LOCATION_LATITUDE].getValue(),
+        LocationNP[LOCATION_ELEVATION].getValue()
+    };
+}
+
+// keep the simulated Az/Alt in step with the simulated RA/Dec
+void CelestronGPS::simAxesFromRaDec()
+{
+    INDI::IEquatorialCoordinates equatorial {currentRA, currentDEC};
+    INDI::IHorizontalCoordinates horizontal {0, 0};
+    INDI::IGeographicCoordinates observer = simObserver();
+    INDI::EquatorialToHorizontal(&equatorial, &observer, ln_get_julian_from_sys(), &horizontal);
+    simAz  = horizontal.azimuth;
+    simAlt = horizontal.altitude;
+    driver.set_sim_az(simAz);
+    driver.set_sim_alt(simAlt);
 }
 
 void CelestronGPS::simulationTriggered(bool enable)
 {
     driver.set_simulation(enable);
+
+    if (enable)
+        defineProperty(SimTrackModeSP);
+    else
+        deleteProperty(SimTrackModeSP);
 }
 
 // Update Location and time are disabled if the mount is aligned.  This is because
