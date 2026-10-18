@@ -173,6 +173,40 @@ TEST(CelestronDriverTest, getVersionCommands)
     ASSERT_STREQ(version, "3.38");
 }
 
+TEST(CelestronDriverTest, setCustomTrackRate)
+{
+    MockCelestronDriver driver;
+    ::testing::InSequence seq;
+
+    // 100.5 arcsec/s positive on the primary axis, 15 arcsec/s negative on the secondary axis
+    driver.set_response("#");
+    uint8_t cmd1[] = {'P', 3, 0x10, 0x06, 0x01, 0x92, 0, 0};
+    uint8_t cmd2[] = {'P', 3, 0x11, 0x07, 0x00, 0x3c, 0, 0};
+    EXPECT_CALL(driver, serial_write(MemEq(cmd1, 8), 8, _));
+    EXPECT_CALL(driver, serial_read(1, _));
+    EXPECT_CALL(driver, serial_write(MemEq(cmd2, 8), 8, _));
+    EXPECT_CALL(driver, serial_read(1, _));
+    EXPECT_TRUE(driver.set_custom_track_rate(100.5, -15.0));
+
+    // zero stops both axes
+    uint8_t cmd3[] = {'P', 3, 0x10, 0x06, 0, 0, 0, 0};
+    uint8_t cmd4[] = {'P', 3, 0x11, 0x06, 0, 0, 0, 0};
+    EXPECT_CALL(driver, serial_write(MemEq(cmd3, 8), 8, _));
+    EXPECT_CALL(driver, serial_read(1, _));
+    EXPECT_CALL(driver, serial_write(MemEq(cmd4, 8), 8, _));
+    EXPECT_CALL(driver, serial_read(1, _));
+    EXPECT_TRUE(driver.set_custom_track_rate(0, 0));
+
+    // rates beyond the limit are clamped below the 0xFFFD..0xFFFF sidereal/solar/lunar codes
+    uint8_t cmd5[] = {'P', 3, 0x10, 0x06, 0xff, 0xfc, 0, 0};
+    uint8_t cmd6[] = {'P', 3, 0x11, 0x07, 0xff, 0xfc, 0, 0};
+    EXPECT_CALL(driver, serial_write(MemEq(cmd5, 8), 8, _));
+    EXPECT_CALL(driver, serial_read(1, _));
+    EXPECT_CALL(driver, serial_write(MemEq(cmd6, 8), 8, _));
+    EXPECT_CALL(driver, serial_read(1, _));
+    EXPECT_TRUE(driver.set_custom_track_rate(20000, -16383.9));
+}
+
 TEST(CelestronDriverTest, setDateTime)
 {
     MockCelestronDriver driver;

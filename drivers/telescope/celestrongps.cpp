@@ -56,7 +56,7 @@ static std::unique_ptr<CelestronGPS> telescope(new CelestronGPS());
 
 CelestronGPS::CelestronGPS() : GI(this), FI(this)
 {
-    setVersion(3, 6); // update libindi/drivers.xml as well
+    setVersion(3, 7); // update libindi/drivers.xml as well
 
 
     fwInfo.Version           = "Invalid";
@@ -135,10 +135,30 @@ bool CelestronGPS::initProperties()
     IUFillSwitch(&CelestronTrackModeS[2], "MODE_EQ_S", "EQ S", ISS_OFF);
     IUFillSwitch(&CelestronTrackModeS[3], "MODE_RA_DEC", "Ra and Dec", ISS_OFF);
 
+    // In simulation the track mode of the simulated mount, in the same order as CelestronTrackModeS
+    SimTrackModeSP[0].fill("MODE_ALTAZ", "Alt Az", ISS_OFF);
+    SimTrackModeSP[1].fill("MODE_EQ_N", "EQ N", ISS_ON);
+    SimTrackModeSP[2].fill("MODE_EQ_S", "EQ S", ISS_OFF);
+    SimTrackModeSP.fill(getDeviceName(), "SIM_CELESTRON_TRACK_MODE", "Sim Track Mode", OPTIONS_TAB, IP_RW, ISR_1OFMANY, 0,
+                        IPS_IDLE);
+
     // INDI track modes are sidereal, solar and lunar
     AddTrackMode("TRACK_SIDEREAL", "Sidereal", true);
     AddTrackMode("TRACK_SOLAR", "Solar");
     AddTrackMode("TRACK_LUNAR", "Lunar");
+    AddTrackMode("TRACK_CUSTOM", "Custom");
+
+    // Custom track rates are signed motor (axis) rates: RA/Az motor and Dec/Alt motor.
+    // The limits are what the variable rate command can carry.
+    TrackRateNP[AXIS_RA].fill("TRACK_RATE_RA", "RA/Az axis (arcsecs/s)", "%.6f", -CELESTRON_MAX_CUSTOM_RATE,
+                              CELESTRON_MAX_CUSTOM_RATE, 0.000001, 0);
+    TrackRateNP[AXIS_DE].fill("TRACK_RATE_DE", "DE/Alt axis (arcsecs/s)", "%.6f", -CELESTRON_MAX_CUSTOM_RATE,
+                              CELESTRON_MAX_CUSTOM_RATE, 0.000001, 0);
+
+    HorizontalCoordsNP[0].fill("AZ", "Az D:M:S", "%10.6m", 0., 360., 0., 0.);
+    HorizontalCoordsNP[1].fill("ALT", "Alt D:M:S", "%10.6m", -90., 90., 0., 0.);
+    HorizontalCoordsNP.fill(getDeviceName(), "HORIZONTAL_COORD", "Horizontal Coords", MAIN_CONTROL_TAB, IP_RO, 0,
+                            IPS_IDLE);
 
     IUFillSwitch(&UseHibernateS[0], "Enable", "", ISS_OFF);
     IUFillSwitch(&UseHibernateS[1], "Disable", "", ISS_ON);
@@ -251,6 +271,8 @@ void CelestronGPS::ISGetProperties(const char *dev)
 
     defineProperty(&UseHibernateSP);
     defineProperty(&CelestronTrackModeSP);
+    if (isSimulation())
+        defineProperty(SimTrackModeSP);
     if (configLoaded == false)
     {
         configLoaded = true;
@@ -309,7 +331,11 @@ bool CelestronGPS::updateProperties()
 
         // StarSense supports track mode
         if (checkMinVersion(2.3, "track on/off"))
-            cap |= TELESCOPE_CAN_CONTROL_TRACK;
+        {
+            // TELESCOPE_HAS_TRACK_MODE only offers the track rate choices here, so the Custom mode can
+            // drive both motors at TELESCOPE_TRACK_RATE. It is unrelated to the Celestron track mode.
+            cap |= TELESCOPE_CAN_CONTROL_TRACK | TELESCOPE_HAS_TRACK_MODE | TELESCOPE_HAS_TRACK_RATE;
+        }
         else
             LOG_WARN("Mount firmware does not support track on off.");
 
@@ -327,7 +353,7 @@ bool CelestronGPS::updateProperties()
                 if (isParked())
                     driver.set_sim_track_mode(CTM_OFF);
                 else
-                    driver.set_sim_track_mode(CTM_EQN);
+                    driver.set_sim_track_mode(static_cast<CELESTRON_TRACK_MODE>(SimTrackModeSP.findOnSwitchIndex() + 1));
             }
             if (driver.get_track_mode(&ctm))
             {
@@ -372,6 +398,10 @@ bool CelestronGPS::updateProperties()
 
         if (fwInfo.Version != "Invalid")
             defineProperty(&FirmwareTP);
+
+        canGetAzAlt = checkMinVersion(1.2, "Az/Alt coordinates");
+        if (canGetAzAlt)
+            defineProperty(HorizontalCoordsNP);
 
         if (InitPark())
         {
@@ -538,6 +568,7 @@ bool CelestronGPS::updateProperties()
 
         deleteProperty(LastAlignSP.name);
         deleteProperty(CelestronTrackModeSP.name);
+        deleteProperty(HorizontalCoordsNP);
 
         deleteProperty(DSTSettingSP.name);
 
@@ -563,6 +594,10 @@ bool CelestronGPS::Goto(double ra, double dec)
         // sleep for 500 mseconds
         usleep(500000);
     }
+
+    // custom tracking resumes when the slew completes
+    if (customTrackingActive)
+        stopCustomTracking();
 
     if (driver.slew_radec(targetRA + SlewOffsetRa, targetDEC, usePreciseCoords) == false)
     {
@@ -640,7 +675,7 @@ bool CelestronGPS::GotoAzAlt(double az, double alt)
 
     TrackState = SCOPE_SLEWING;
 
-    HorizontalCoordsNP.s = IPS_BUSY;
+    HorizontalCoordsNP.setState(IPS_BUSY);
 
     char AZStr[16], ALTStr[16];
     fs_sexa(AZStr, targetAZ, 3, 3600);
@@ -730,6 +765,19 @@ bool CelestronGPS::ReadScopeStatus()
     {
         LOG_ERROR("Failed to read RA/DEC values.");
         return false;
+    }
+
+    if (canGetAzAlt)
+    {
+        if (driver.get_azalt(&currentAZ, &currentALT, usePreciseCoords))
+        {
+            HorizontalCoordsNP[0].setValue(currentAZ);
+            HorizontalCoordsNP[1].setValue(currentALT);
+            HorizontalCoordsNP.setState(IPS_OK);
+        }
+        else
+            HorizontalCoordsNP.setState(IPS_ALERT);
+        HorizontalCoordsNP.apply();
     }
 
     if (HasPierSide())
@@ -1007,6 +1055,9 @@ bool CelestronGPS::ReadScopeStatus()
 
 bool CelestronGPS::Abort()
 {
+    if (customTrackingActive && stopCustomTracking())
+        TrackState = SCOPE_IDLE;
+
     driver.stop_motion(CELESTRON_N);
     driver.stop_motion(CELESTRON_S);
     driver.stop_motion(CELESTRON_W);
@@ -1070,6 +1121,17 @@ bool CelestronGPS::ISNewSwitch(const char *dev, const char *name, ISState *state
 {
     if (dev && std::string(getDeviceName()) == dev)
     {
+        // Simulated Celestron track mode
+        if (SimTrackModeSP.isNameMatch(name))
+        {
+            SimTrackModeSP.update(states, names, n);
+            SimTrackModeSP.setState(IPS_OK);
+            SimTrackModeSP.apply();
+            if (isConnected())
+                LOG_INFO("The simulated track mode takes effect when connecting.");
+            return true;
+        }
+
         // Enable/Disable hibernate
         if (name && std::string(name) == UseHibernateSP.name)
         {
@@ -1394,6 +1456,7 @@ void CelestronGPS::mountSim()
 
         driver.set_sim_ra(currentRA);
         driver.set_sim_dec(currentDEC);
+        simAxesFromRaDec();
 
         NewRaDec(currentRA, currentDEC);
 
@@ -1452,17 +1515,76 @@ void CelestronGPS::mountSim()
 
             break;
 
+        case SCOPE_TRACKING:
+            // custom tracking moves the axes at the commanded signed rates
+            if (customTrackingActive && fwInfo.celestronTrackMode == CTM_ALTAZ)
+            {
+                simAz  = range360(simAz + TrackRateNP[AXIS_RA].getValue() * dt / 3600.0);
+                simAlt = std::max(-90.0, std::min(90.0, simAlt + TrackRateNP[AXIS_DE].getValue() * dt / 3600.0));
+
+                INDI::IHorizontalCoordinates horizontal {simAz, simAlt};
+                INDI::IEquatorialCoordinates equatorial {0, 0};
+                INDI::IGeographicCoordinates observer = simObserver();
+                INDI::HorizontalToEquatorial(&horizontal, &observer, ln_get_julian_from_sys(), &equatorial);
+                currentRA  = equatorial.rightascension;
+                currentDEC = equatorial.declination;
+
+                driver.set_sim_ra(currentRA);
+                driver.set_sim_dec(currentDEC);
+                driver.set_sim_az(simAz);
+                driver.set_sim_alt(simAlt);
+                return;
+            }
+            else if (customTrackingActive)
+            {
+                // the RA axis tracks at the positive sidereal rate in the north, negative in the south
+                double direction = (fwInfo.celestronTrackMode == CTM_EQS) ? -1 : 1;
+                currentRA  = range24(currentRA + (TRACKRATE_SIDEREAL - direction * TrackRateNP[AXIS_RA].getValue()) * dt /
+                                     3600.0 / 15.0);
+                currentDEC = rangeDec(currentDEC + TrackRateNP[AXIS_DE].getValue() * dt / 3600.0);
+            }
+            break;
+
         default:
             break;
     }
 
     driver.set_sim_ra(currentRA);
     driver.set_sim_dec(currentDEC);
+    simAxesFromRaDec();
+}
+
+INDI::IGeographicCoordinates CelestronGPS::simObserver()
+{
+    return INDI::IGeographicCoordinates
+    {
+        range360(LocationNP[LOCATION_LONGITUDE].getValue()),
+        LocationNP[LOCATION_LATITUDE].getValue(),
+        LocationNP[LOCATION_ELEVATION].getValue()
+    };
+}
+
+// keep the simulated Az/Alt in step with the simulated RA/Dec
+void CelestronGPS::simAxesFromRaDec()
+{
+    INDI::IEquatorialCoordinates equatorial {currentRA, currentDEC};
+    INDI::IHorizontalCoordinates horizontal {0, 0};
+    INDI::IGeographicCoordinates observer = simObserver();
+    INDI::EquatorialToHorizontal(&equatorial, &observer, ln_get_julian_from_sys(), &horizontal);
+    simAz  = horizontal.azimuth;
+    simAlt = horizontal.altitude;
+    driver.set_sim_az(simAz);
+    driver.set_sim_alt(simAlt);
 }
 
 void CelestronGPS::simulationTriggered(bool enable)
 {
     driver.set_simulation(enable);
+
+    if (enable)
+        defineProperty(SimTrackModeSP);
+    else
+        deleteProperty(SimTrackModeSP);
 }
 
 // Update Location and time are disabled if the mount is aligned.  This is because
@@ -1547,6 +1669,9 @@ bool CelestronGPS::Park()
     // unsync is only for NS+ 5.29 or more and not StarSense
     if (fwInfo.controllerVersion >= 5.29 && !driver.unsync())
         return false;
+
+    if (customTrackingActive)
+        stopCustomTracking();
 
     LOGF_DEBUG("Parking to Az (%s) Alt (%s)...", AzStr, AltStr);
 
@@ -1931,17 +2056,27 @@ void CelestronGPS::AddGuideTimer(CELESTRON_DIRECTION dirn, int ms)
 // end of guiding code
 
 // the INDI overload, expected to set the track rate
-// sidereal, solar or lunar and only if the mount is equatorial
+// sidereal, solar or lunar only if the mount is equatorial, custom on any mount
 bool CelestronGPS::SetTrackMode(uint8_t mode)
 {
     CELESTRON_TRACK_RATE rate;
 
+    if (mode == TRACK_CUSTOM)
+        return startCustomTracking();
+
     switch (fwInfo.celestronTrackMode)
     {
         case CTM_OFF:
-        case CTM_ALTAZ:
         case CTM_RADEC:
             return false;
+        case CTM_ALTAZ:
+            // the mount tracks at the sidereal rate by itself
+            if (mode != TRACK_SIDEREAL)
+            {
+                LOG_WARN("Alt-Az mounts only support sidereal or custom tracking.");
+                return false;
+            }
+            break;
         case CTM_EQN:
         case CTM_EQS:
             break;
@@ -1949,25 +2084,74 @@ bool CelestronGPS::SetTrackMode(uint8_t mode)
 
     switch (mode)
     {
-        case 0:
+        case TRACK_SIDEREAL:
             rate = CTR_SIDEREAL;
             break;
-        case 1:
+        case TRACK_SOLAR:
             rate = CTR_SOLAR;
             break;
-        case 2:
+        case TRACK_LUNAR:
             rate = CTR_LUNAR;
             break;
         default:
             return false;
     }
+
+    // leaving custom tracking, give tracking back to the mount
+    if (customTrackingActive && !(stopCustomTracking() && setCelestronTrackMode(fwInfo.celestronTrackMode)))
+        return false;
+
+    if (fwInfo.celestronTrackMode == CTM_ALTAZ)
+        return true;
+
     return driver.set_track_rate(rate, fwInfo.celestronTrackMode);
 }
 
 bool CelestronGPS::SetTrackEnabled(bool enabled)
 {
+    if (enabled && TrackModeSP.findOnSwitchIndex() == TRACK_CUSTOM)
+        return startCustomTracking();
+
+    if (!enabled && customTrackingActive && !stopCustomTracking())
+        return false;
+
     return setCelestronTrackMode(enabled ? fwInfo.celestronTrackMode : CTM_OFF);
     //return setTrackMode(enabled ? static_cast<CELESTRON_TRACK_MODE>(IUFindOnSwitchIndex(&TrackModeSP)+1) : TRACKING_OFF);
+}
+
+// only called by INDI::Telescope while tracking in custom mode
+bool CelestronGPS::SetTrackRate(double raRate, double deRate)
+{
+    // TrackRateNP already holds the new rates, so starting picks them up
+    if (!customTrackingActive)
+        return startCustomTracking();
+
+    return driver.set_custom_track_rate(raRate, deRate);
+}
+
+bool CelestronGPS::startCustomTracking()
+{
+    // the mount's own tracking would overwrite the axis rates
+    if (!driver.set_track_mode(CTM_OFF))
+        return false;
+
+    if (!driver.set_custom_track_rate(TrackRateNP[AXIS_RA].getValue(), TrackRateNP[AXIS_DE].getValue()))
+        return false;
+
+    customTrackingActive = true;
+    LOGF_DEBUG("Custom tracking at axis rates %.4f, %.4f arcsec/s.", TrackRateNP[AXIS_RA].getValue(),
+               TrackRateNP[AXIS_DE].getValue());
+    return true;
+}
+
+bool CelestronGPS::stopCustomTracking()
+{
+    if (!driver.set_custom_track_rate(0, 0))
+        return false;
+
+    customTrackingActive = false;
+    LOG_DEBUG("Custom tracking stopped.");
+    return true;
 }
 
 void CelestronGPS::checkAlignment()

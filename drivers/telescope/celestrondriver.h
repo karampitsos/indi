@@ -150,6 +150,10 @@ typedef enum
     CTR_LUNAR    = 0xFFFD
 } CELESTRON_TRACK_RATE;
 
+// Maximum custom (variable) axis rate in arcsec/s. The rate is sent as rate * 4 in 16 bits
+// and must stay below the CELESTRON_TRACK_RATE codes, so 16383 * 4 = 0xFFFC is the limit.
+#define CELESTRON_MAX_CUSTOM_RATE 16383.0
+
 typedef struct
 {
     std::string Model;
@@ -173,7 +177,7 @@ typedef struct SimData
     double az;
     double alt;
     CELESTRON_SLEW_RATE slewRate;
-    CELESTRON_TRACK_MODE trackMode;
+    CELESTRON_TRACK_MODE trackMode = CTM_EQN;
     CELESTRON_GPS_STATUS gpsStatus;
     bool isSlewing;
     uint32_t foc_position = 20000;
@@ -321,6 +325,11 @@ class CelestronDriver
         // set the tracking rate, sidereal, solar or lunar
         bool set_track_rate(CELESTRON_TRACK_RATE rate, CELESTRON_TRACK_MODE mode);
 
+        // set custom signed rates in arcsec/s on both motors, using the variable rate commands.
+        // The primary axis is azimuth for Alt-Az mounts and RA for equatorial mounts, the
+        // secondary axis is altitude or Dec. Rates are clamped to +/- CELESTRON_MAX_CUSTOM_RATE.
+        bool set_custom_track_rate(double primaryRate, double secondaryRate);
+
         // focuser commands
         bool foc_exists();      // read version
         int foc_position();     // read position, return -1 if failed
@@ -367,6 +376,7 @@ class CelestronDriver
                             bool ascii_cmd, bool ascii_resp);
         size_t send_passthrough(int dest, int cmd_id, const char *payload,
                                 size_t payload_len, char *resp, size_t response_len);
+        bool set_axis_rate(int dev, double rate);
 
         char response[MAX_RESP_SIZE];
         bool simulation = false;
