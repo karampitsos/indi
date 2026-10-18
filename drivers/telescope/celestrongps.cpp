@@ -155,6 +155,11 @@ bool CelestronGPS::initProperties()
     TrackRateNP[AXIS_DE].fill("TRACK_RATE_DE", "DE/Alt axis (arcsecs/s)", "%.6f", -CELESTRON_MAX_CUSTOM_RATE,
                               CELESTRON_MAX_CUSTOM_RATE, 0.000001, 0);
 
+    HorizontalCoordsNP[0].fill("AZ", "Az D:M:S", "%10.6m", 0., 360., 0., 0.);
+    HorizontalCoordsNP[1].fill("ALT", "Alt D:M:S", "%10.6m", -90., 90., 0., 0.);
+    HorizontalCoordsNP.fill(getDeviceName(), "HORIZONTAL_COORD", "Horizontal Coords", MAIN_CONTROL_TAB, IP_RO, 0,
+                            IPS_IDLE);
+
     IUFillSwitch(&UseHibernateS[0], "Enable", "", ISS_OFF);
     IUFillSwitch(&UseHibernateS[1], "Disable", "", ISS_ON);
     IUFillSwitchVector(&UseHibernateSP, UseHibernateS, 2, getDeviceName(), "Hibernate", "", OPTIONS_TAB, IP_RW,
@@ -394,6 +399,10 @@ bool CelestronGPS::updateProperties()
         if (fwInfo.Version != "Invalid")
             defineProperty(&FirmwareTP);
 
+        canGetAzAlt = checkMinVersion(1.2, "Az/Alt coordinates");
+        if (canGetAzAlt)
+            defineProperty(HorizontalCoordsNP);
+
         if (InitPark())
         {
             // If loading parking data is successful, we just set the default parking values.
@@ -559,6 +568,7 @@ bool CelestronGPS::updateProperties()
 
         deleteProperty(LastAlignSP.name);
         deleteProperty(CelestronTrackModeSP.name);
+        deleteProperty(HorizontalCoordsNP);
 
         deleteProperty(DSTSettingSP.name);
 
@@ -665,7 +675,7 @@ bool CelestronGPS::GotoAzAlt(double az, double alt)
 
     TrackState = SCOPE_SLEWING;
 
-    HorizontalCoordsNP.s = IPS_BUSY;
+    HorizontalCoordsNP.setState(IPS_BUSY);
 
     char AZStr[16], ALTStr[16];
     fs_sexa(AZStr, targetAZ, 3, 3600);
@@ -755,6 +765,19 @@ bool CelestronGPS::ReadScopeStatus()
     {
         LOG_ERROR("Failed to read RA/DEC values.");
         return false;
+    }
+
+    if (canGetAzAlt)
+    {
+        if (driver.get_azalt(&currentAZ, &currentALT, usePreciseCoords))
+        {
+            HorizontalCoordsNP[0].setValue(currentAZ);
+            HorizontalCoordsNP[1].setValue(currentALT);
+            HorizontalCoordsNP.setState(IPS_OK);
+        }
+        else
+            HorizontalCoordsNP.setState(IPS_ALERT);
+        HorizontalCoordsNP.apply();
     }
 
     if (HasPierSide())

@@ -115,8 +115,9 @@ class CelestronGPS : public INDI::Telescope, public INDI::GuiderInterface, publi
         IText FirmwareT[7] {};
         ITextVectorProperty FirmwareTP;
 
-        //INumberVectorProperty HorizontalCoordsNP;
-        //INumber HorizontalCoordsN[2];
+        // Current Az/Alt reported by the mount
+        INDI::PropertyNumber HorizontalCoordsNP {2}; // AZ, ALT
+        bool canGetAzAlt {false};
 
         //ISwitch TrackS[4];
         //ISwitchVectorProperty TrackSP;
