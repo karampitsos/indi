@@ -31,6 +31,8 @@
 #include "indifocuserinterface.h"
 #include "inditelescope.h"
 
+#include <sys/time.h>
+
 class LX200Telescope : public INDI::Telescope, public INDI::GuiderInterface, public INDI::FocuserInterface
 {
     public:
@@ -147,7 +149,9 @@ class LX200Telescope : public INDI::Telescope, public INDI::GuiderInterface, pub
         bool updateSlewRate(int index);
 
         // Simulate Mount in simulation mode
-        void mountSim();
+        virtual void mountSim();
+        // Time of the last simulation step
+        timeval simLastStep {0, 0};
 
         // Focus functions
         static void updateFocusHelper(void *p);
