@@ -21,6 +21,7 @@
 #pragma once
 
 #include "lx200autostar.h"
+#include "libastro.h"
 
 class LX200GPS : public LX200Autostar
 {
@@ -38,6 +39,18 @@ class LX200GPS : public LX200Autostar
 
     protected:
         virtual bool UnPark();
+        virtual bool Disconnect() override;
+        virtual bool ReadScopeStatus() override;
+        virtual bool Goto(double ra, double dec) override;
+        virtual bool Park() override;
+        virtual bool Abort() override;
+        virtual void getBasicData() override;
+        virtual void mountSim() override;
+
+        // Tracking
+        virtual bool SetTrackMode(uint8_t mode) override;
+        virtual bool SetTrackEnabled(bool enabled) override;
+        virtual bool SetTrackRate(double raRate, double deRate) override;
 
         ISwitchVectorProperty GPSPowerSP;
         ISwitch GPSPowerS[2];
@@ -70,6 +83,28 @@ class LX200GPS : public LX200Autostar
         INumber OTATempN[1];
 
         INDI::PropertyNumber GuideRateNP {2};
-        
-        virtual bool saveConfigItems(FILE *fp);    
+
+        // Current Alt/Az reported by the mount, the axis positions for custom tracking
+        INDI::PropertyNumber CurrentAltAzNP {2}; // ALT, AZ
+        bool canGetAltAz {false};
+
+        virtual bool saveConfigItems(FILE *fp);
+
+    private:
+        // Custom tracking moves both axes at the TELESCOPE_TRACK_RATE axis rates (:RA#/:RE# and the :M# moves),
+        // with the mount's own tracking switched off.
+        bool startCustomTracking();
+        bool stopCustomTracking();
+        bool moveCustomAxis(INDI_EQ_AXIS axis, double rate);
+        bool customTrackingActive {false};
+        int customDirection[2] {0, 0}; // Move in progress on each axis: -1, 0 or 1
+
+        // The mount's own tracking, switched off with the Land alignment
+        bool setMountTracking(bool enabled);
+        bool mountTrackingOff {false};
+
+        // Simulated axis positions, the Alt-Az simulation integrates the custom rates on them
+        double simAz {0}, simAlt {0};
+        INDI::IGeographicCoordinates simObserver();
+        void simAxesFromRaDec();
 };

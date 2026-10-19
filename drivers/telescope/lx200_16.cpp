@@ -32,6 +32,8 @@
 LX200_16::LX200_16() : LX200GPS()
 {
     MaxReticleFlashRate = 3;
+    // The 16" has its own HORIZONTAL_COORD and status loop, without the custom axis rates of the LX200 GPS
+    SetTelescopeCapability(GetTelescopeCapability() & ~TELESCOPE_HAS_TRACK_RATE, 4);
 }
 
 const char *LX200_16::getDefaultName()
