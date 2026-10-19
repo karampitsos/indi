@@ -111,6 +111,10 @@ bool LX200GPS::initProperties()
     CurrentAltAzNP.fill(getDeviceName(), "HORIZONTAL_COORD", "Horizontal Coords", MAIN_CONTROL_TAB, IP_RO, 0,
                         IPS_IDLE);
 
+    MountAxesNP[0].fill("PRIMARY", "Primary (Az or HA, deg)", "%.4f", -360., 360., 0., 0.);
+    MountAxesNP[1].fill("SECONDARY", "Secondary (Alt or Dec, deg)", "%.4f", -90., 90., 0., 0.);
+    MountAxesNP.fill(getDeviceName(), "MOUNT_AXES", "Mount Axes", MOTION_TAB, IP_RO, 0, IPS_IDLE);
+
     MountTypeSP.reset();
     MountTypeSP[MOUNT_ALTAZ].setState(ISS_ON);
 
@@ -174,8 +178,10 @@ bool LX200GPS::updateProperties()
         deleteProperty(OTAUpdateSP.name);
         deleteProperty(GuideRateNP);
         deleteProperty(CurrentAltAzNP);
+        deleteProperty(MountAxesNP);
 
         canGetAltAz          = false;
+        canGetSiderealTime   = false;
         customTrackingActive = false;
         mountTrackingOff     = false;
         customDirection[AXIS_RA] = customDirection[AXIS_DE] = 0;
@@ -472,13 +478,58 @@ void LX200GPS::getBasicData()
     if (!HasTrackRate())
         return;
 
-    // Not every LX200 controller answers :GA# and :GZ#
-    double alt = 0, az = 0;
-    canGetAltAz = isSimulation() || (getLX200Alt(PortFD, &alt) == 0 && getLX200Az(PortFD, &az) == 0);
+    // The mount axes are Az/Alt from :GA# and :GZ#, or on a polar mount the hour angle from :GS# and RA/Dec.
+    // Not every LX200 controller answers these, so only the ones the alignment needs are tried.
+    bool polar = IUFindOnSwitchIndex(&AlignmentSP) == LX200_ALIGN_POLAR;
+    double alt = 0, az = 0, lst = 0;
+    canGetAltAz = isSimulation() || (!polar && getLX200Alt(PortFD, &alt) == 0 && getLX200Az(PortFD, &az) == 0);
+    canGetSiderealTime = isSimulation() || (polar && getSDTime(PortFD, &lst) == 0);
+
     if (canGetAltAz)
         defineProperty(CurrentAltAzNP);
+
+    if (polar ? canGetSiderealTime : canGetAltAz)
+        defineProperty(MountAxesNP);
     else
-        LOG_WARN("The mount does not report Alt/Az (:GA#, :GZ#), HORIZONTAL_COORD is not available.");
+        LOGF_WARN("The mount does not report %s, MOUNT_AXES is not available.",
+                  polar ? "the sidereal time (:GS#)" : "Alt/Az (:GA#, :GZ#)");
+}
+
+void LX200GPS::updateMountAxes()
+{
+    double primary = 0, secondary = 0;
+    bool ok = false;
+
+    if (IUFindOnSwitchIndex(&AlignmentSP) == LX200_ALIGN_POLAR)
+    {
+        // hour angle and declination, the RA/Dec just read by the status update
+        double lst = 0;
+        if (isSimulation())
+        {
+            lst = get_local_sidereal_time(LocationNP[LOCATION_LONGITUDE].getValue());
+            ok  = true;
+        }
+        else
+            ok = canGetSiderealTime && getSDTime(PortFD, &lst) == 0;
+        primary   = rangeHA(lst - currentRA) * 15.0;
+        secondary = currentDEC;
+    }
+    else if (canGetAltAz && CurrentAltAzNP.getState() == IPS_OK)
+    {
+        primary   = CurrentAltAzNP[1].getValue();
+        secondary = CurrentAltAzNP[0].getValue();
+        ok        = true;
+    }
+
+    if (ok)
+    {
+        MountAxesNP[0].setValue(primary);
+        MountAxesNP[1].setValue(secondary);
+        MountAxesNP.setState(IPS_OK);
+    }
+    else
+        MountAxesNP.setState(IPS_ALERT);
+    MountAxesNP.apply();
 }
 
 bool LX200GPS::ReadScopeStatus()
@@ -506,6 +557,9 @@ bool LX200GPS::ReadScopeStatus()
             CurrentAltAzNP.setState(IPS_ALERT);
         CurrentAltAzNP.apply();
     }
+
+    if (canGetAltAz || canGetSiderealTime)
+        updateMountAxes();
 
     return true;
 }

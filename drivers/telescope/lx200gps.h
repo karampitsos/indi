@@ -84,9 +84,14 @@ class LX200GPS : public LX200Autostar
 
         INDI::PropertyNumber GuideRateNP {2};
 
-        // Current Alt/Az reported by the mount, the axis positions for custom tracking
+        // Current Alt/Az reported by the mount
         INDI::PropertyNumber CurrentAltAzNP {2}; // ALT, AZ
         bool canGetAltAz {false};
+
+        // Positions of the axes the custom rates move: Az/Alt, or hour angle/Dec on a polar mount
+        INDI::PropertyNumber MountAxesNP {2}; // PRIMARY, SECONDARY
+        bool canGetSiderealTime {false};
+        void updateMountAxes();
 
         virtual bool saveConfigItems(FILE *fp);
 

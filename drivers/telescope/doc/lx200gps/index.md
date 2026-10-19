@@ -12,6 +12,7 @@ implement the LX200 GPS serial commands. It is built from the LX200 generic driv
 - Tracking on and off, with Sidereal, Solar and Lunar rates
 - **Custom tracking:** continuous signed rates on both axes (see below)
 - Alt/Az reported in `HORIZONTAL_COORD`, when the controller answers `:GA#` and `:GZ#`
+- Axis positions reported in `MOUNT_AXES`, for clients that command axis rates
 - GPS, PEC and anti-backlash controls, focuser
 - Simulation mode
 
@@ -57,6 +58,20 @@ disconnecting stop the axes; after a GoTo, custom tracking resumes when the slew
 As in other INDI drivers, a rate can't change sign while tracking: switch tracking off, set the
 new rates and switch tracking on again.
 
+### Axis positions
+
+`MOUNT_AXES` reports the positions of the two axes the rates move, in degrees, every poll:
+
+| Alignment | `PRIMARY` | `SECONDARY` |
+|---|---|---|
+| AltAz, Land | azimuth (`:GZ#`) | altitude (`:GA#`) |
+| Polar | hour angle, `:GS#` minus `:GR#` | declination (`:GD#`) |
+
+The hour angle uses the controller's own sidereal time, so it matches the controller's RA axis
+even if its clock is not exact. At connect the driver checks the commands the alignment needs
+(`:GA#`/`:GZ#`, or `:GS#` on a polar mount); if the controller doesn't answer, `MOUNT_AXES` is
+not defined. `HORIZONTAL_COORD` is only defined for AltAz and Land mounts that answer `:GA#`/`:GZ#`.
+
 ### Serial commands
 
 | Action | Commands |
@@ -65,7 +80,7 @@ new rates and switch tracking on again.
 | Axis rate, degrees per second | `:RAd.dddd#` (RA/Az axis), `:REd.dddd#` (Dec/Alt axis) |
 | Move at that rate | `:Mw#` / `:Me#` (RA/Az axis), `:Mn#` / `:Ms#` (Dec/Alt axis) |
 | Stop one direction / all | `:Qw#` `:Qe#` `:Qn#` `:Qs#` / `:Q#` |
-| Position | `:GA#`, `:GZ#` (Alt/Az), `:GR#`, `:GD#` (RA/Dec) |
+| Position | `:GA#`, `:GZ#` (Alt/Az), `:GR#`, `:GD#` (RA/Dec), `:GS#` (sidereal time) |
 
 The rate is sent as an unsigned number with four decimals, for example `:RA0.1000#` for
 360 arcsec/s. That is more precise than the `DD.D` in the Meade protocol; a controller that only
