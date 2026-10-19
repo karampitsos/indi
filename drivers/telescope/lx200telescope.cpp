@@ -982,7 +982,6 @@ void LX200Telescope::updateFocusTimer()
 
 void LX200Telescope::mountSim()
 {
-    static struct timeval ltv;
     struct timeval tv;
     double dt = 0, da = 0, dx = 0;
     int nlocked = 0;
@@ -990,11 +989,11 @@ void LX200Telescope::mountSim()
     /* update elapsed time since last poll, don't presume exactly POLLMS */
     gettimeofday(&tv, nullptr);
 
-    if (ltv.tv_sec == 0 && ltv.tv_usec == 0)
-        ltv = tv;
+    if (simLastStep.tv_sec == 0 && simLastStep.tv_usec == 0)
+        simLastStep = tv;
 
-    dt  = tv.tv_sec - ltv.tv_sec + (tv.tv_usec - ltv.tv_usec) / 1e6;
-    ltv = tv;
+    dt  = tv.tv_sec - simLastStep.tv_sec + (tv.tv_usec - simLastStep.tv_usec) / 1e6;
+    simLastStep = tv;
     da  = LX200_GENERIC_SLEWRATE * dt;
 
     /* Process per current state. We check the state of EQUATORIAL_COORDS and act accordingly */

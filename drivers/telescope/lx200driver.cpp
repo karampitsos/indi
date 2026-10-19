@@ -1752,6 +1752,51 @@ int HaltMovement(int fd, int direction)
     return 0;
 }
 
+static int setAxisSlewRate(int fd, const char *cmd, double rate)
+{
+    char command[RB_MAX_LEN] = {0};
+    int error_type;
+    int nbytes_write = 0;
+
+    if (rate < 0)
+        return -1;
+
+    // Four decimals (0.36 arcsec/s) instead of the one in the protocol, so the rate can be used for tracking
+    snprintf(command, sizeof(command), "%s%.4f#", cmd, rate);
+    DEBUGFDEVICE(lx200Name, DBG_SCOPE, "CMD <%s>", command);
+
+    /* Add mutex */
+    std::unique_lock<std::mutex> guard(lx200CommsLock);
+
+    if ((error_type = tty_write_string(fd, command, &nbytes_write)) != TTY_OK)
+        return error_type;
+
+    tcflush(fd, TCIFLUSH);
+    return 0;
+}
+
+int setRAAzSlewRate(int fd, double rate)
+{
+    DEBUGFDEVICE(lx200Name, DBG_SCOPE, "<%s>", __FUNCTION__);
+
+    // Meade Telescope Serial Command Protocol Revision 2010.10
+    // :RADD.D#
+    // Set RA/Azimuth slew rate to DD.D degrees per second, the rate of the :Me# and :Mw# moves [LX200GPS only]
+    // Returns: Nothing
+    return setAxisSlewRate(fd, ":RA", rate);
+}
+
+int setDecAltSlewRate(int fd, double rate)
+{
+    DEBUGFDEVICE(lx200Name, DBG_SCOPE, "<%s>", __FUNCTION__);
+
+    // Meade Telescope Serial Command Protocol Revision 2010.10
+    // :REDD.D#
+    // Set Dec/Elevation slew rate to DD.D degrees per second, the rate of the :Mn# and :Ms# moves [LX200GPS only]
+    // Returns: Nothing
+    return setAxisSlewRate(fd, ":RE", rate);
+}
+
 int abortSlew(int fd)
 {
     DEBUGFDEVICE(lx200Name, DBG_SCOPE, "<%s>", __FUNCTION__);
