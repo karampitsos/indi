@@ -2632,8 +2632,9 @@ bool LX200_OnStep::ReadScopeStatus()
             Lasterror = (Errors)(OSStat[strlen(OSStat) - 1] - '0');
 
             // Refresh current Slew Rate
+            // OnStepX reports the custom rate of :RA#/:RE# as 10 (':'), which is not one of the slew rates
             int idx = OSStat[strlen(OSStat) - 2] - '0';
-            if (SlewRateSP.findOnSwitchIndex() != idx)
+            if (idx >= 0 && idx < static_cast<int>(SlewRateSP.count()) && SlewRateSP.findOnSwitchIndex() != idx)
             {
                 SlewRateSP.reset();
                 SlewRateSP[idx].setState(ISS_ON);
