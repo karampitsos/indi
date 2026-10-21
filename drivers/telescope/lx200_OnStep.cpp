@@ -29,6 +29,8 @@
 #include "lx200_OnStep.h"
 
 
+#include <algorithm>
+#include <cmath>
 #include <mutex>
 
 #define LIBRARY_TAB  "Library"
@@ -43,6 +45,11 @@
 #define RA_AXIS     0
 #define DEC_AXIS    1
 
+// Limit of the custom axis rates, arcsec/s; OnStepX limits them to the goto rate
+#define ONSTEP_MAX_CUSTOM_RATE 16384.0
+// OnStepX ends a :M# move after GUIDE_TIME_LIMIT seconds (10 by default), so the moves are sent again
+#define ONSTEP_CUSTOM_MOVE_REFRESH std::chrono::seconds(2)
+
 extern std::mutex lx200CommsLock;
 
 
@@ -51,7 +58,7 @@ LX200_OnStep::LX200_OnStep() : LX200Generic(), WI(this), RotatorInterface(this)
     currentCatalog    = LX200_STAR_C;
     currentSubCatalog = 0;
 
-    setVersion(1, 27);   // don't forget to update libindi/drivers.xml
+    setVersion(1, 28);   // don't forget to update libindi/drivers.xml
 
     setLX200Capability(LX200_HAS_TRACKING_FREQ | LX200_HAS_SITES | LX200_HAS_ALIGNMENT_TYPE | LX200_HAS_PULSE_GUIDING |
                        LX200_HAS_PRECISE_TRACKING_FREQ);
@@ -99,6 +106,12 @@ bool LX200_OnStep::initProperties()
     SetParkDataType(PARK_RA_DEC);
 
     initSlewRates();
+
+    // Custom track rates are signed axis rates: RA/Az axis and Dec/Alt axis
+    TrackRateNP[AXIS_RA].fill("TRACK_RATE_RA", "RA/Az axis (arcsecs/s)", "%.6f", -ONSTEP_MAX_CUSTOM_RATE,
+                              ONSTEP_MAX_CUSTOM_RATE, 0.000001, 0);
+    TrackRateNP[AXIS_DE].fill("TRACK_RATE_DE", "DE/Alt axis (arcsecs/s)", "%.6f", -ONSTEP_MAX_CUSTOM_RATE,
+                              ONSTEP_MAX_CUSTOM_RATE, 0.000001, 0);
 
     //FocuserInterface
     //Initial, these will be updated later.
@@ -689,6 +702,10 @@ bool LX200_OnStep::updateProperties()
         // Connection
 
         // Options
+
+        customTrackingActive = false;
+        customResumePending  = false;
+        customDirection[AXIS_RA] = customDirection[AXIS_DE] = 0;
 
         // Motion Control
         deleteProperty(SlewRateSP);    // was missing
@@ -2087,6 +2104,10 @@ bool LX200_OnStep::UnPark()
 
 bool LX200_OnStep::Park()
 {
+    customResumePending = false;
+    if (customTrackingActive && !(stopCustomTracking() && waitForCustomMovesToEnd()))
+        return false;
+
     if (!isSimulation())
     {
         // If scope is moving, let's stop it first.
@@ -2267,6 +2288,7 @@ bool LX200_OnStep::ReadScopeStatus()
                 }
                 PrintTrackState();
             }
+            updateCustomTracking();
             // Set TrackStateSP based on above, but only change if needed.
             // NOTE: Technically during a slew it can have tracking on, but elsewhere there is the assumption:
             //      Slewing = Not tracking
@@ -3390,7 +3412,23 @@ bool LX200_OnStep::ReadScopeStatus()
 
 bool LX200_OnStep::SetTrackEnabled(bool enabled) //track On/Off events handled by inditelescope       Tested
 {
+    if (enabled && TrackModeSP.findOnSwitchIndex() == TRACK_CUSTOM)
+        return startCustomTracking();
+
+    customResumePending = false;
+    if (customTrackingActive && !stopCustomTracking())
+        return false;
+
+    return setMountTracking(enabled);
+}
+
+// the mount's own tracking, :Te# and :Td#
+bool LX200_OnStep::setMountTracking(bool enabled)
+{
     char response[RB_MAX_LEN];
+
+    if (isSimulation())
+        return true;
 
     if (enabled)
     {
@@ -4909,23 +4947,237 @@ bool LX200_OnStep::OSGetOutputState(int output)
     return false;
 }
 
+// only called by INDI::Telescope while tracking in custom mode
 bool LX200_OnStep::SetTrackRate(double raRate, double deRate)
 {
-    char read_buffer[RB_MAX_LEN];
-    snprintf(read_buffer, sizeof(read_buffer), ":RA%04f#", raRate);
-    LOGF_INFO("Setting: Custom RA Rate to %04f", raRate);
-    if (!sendOnStepCommand(read_buffer))
-    {
+    // TrackRateNP already holds the new rates, so starting picks them up
+    if (!customTrackingActive)
+        return startCustomTracking();
+
+    if (!moveCustomAxis(AXIS_RA, raRate) || !moveCustomAxis(AXIS_DE, deRate))
         return false;
-    }
-    snprintf(read_buffer, sizeof(read_buffer), ":RE%04f#", deRate);
-    LOGF_INFO("Setting: Custom DE Rate to %04f", deRate);
-    if (!sendOnStepCommand(read_buffer))
-    {
-        return false;
-    }
-    LOG_INFO("Custom RA and DE Rates successfully set");
+
+    customLastMove = std::chrono::steady_clock::now();
+    LOGF_DEBUG("Custom tracking at axis rates %.4f, %.4f arcsec/s.", raRate, deRate);
     return true;
+}
+
+// the INDI overload, called while tracking or slewing
+bool LX200_OnStep::SetTrackMode(uint8_t mode)
+{
+    if (mode == TRACK_CUSTOM)
+        return startCustomTracking();
+
+    // leaving custom tracking, give tracking back to the mount
+    customResumePending = false;
+    if (customTrackingActive && !(stopCustomTracking() && setMountTracking(true)))
+        return false;
+
+    return LX200Generic::SetTrackMode(mode);
+}
+
+bool LX200_OnStep::Abort()
+{
+    customResumePending = false;
+    if (customTrackingActive)
+        stopCustomTracking();
+
+    return LX200Generic::Abort();
+}
+
+bool LX200_OnStep::Disconnect()
+{
+    // don't leave the axes moving; closing the port discards output that has not been sent yet
+    if (customTrackingActive && stopCustomTracking() && !isSimulation())
+        tcdrain(PortFD);
+
+    return LX200Generic::Disconnect();
+}
+
+bool LX200_OnStep::customTrackingSupported()
+{
+    // OnStep 4 ignores a move in the direction already moving, so a new rate would not apply
+    if (isSimulation() || OnStepMountVersion == OSV_OnStepX)
+        return true;
+
+    LOG_ERROR("Custom tracking with axis rates needs OnStepX.");
+    return false;
+}
+
+bool LX200_OnStep::startCustomTracking()
+{
+    if (!customTrackingSupported())
+        return false;
+
+    // OnStepX aborts a goto when a move starts, custom tracking resumes when the slew completes
+    if (TrackState == SCOPE_SLEWING || TrackState == SCOPE_PARKING)
+    {
+        customResumePending = true;
+        return true;
+    }
+
+    // the mount's own tracking would move an axis whose rate is zero
+    if (!setMountTracking(false))
+        return false;
+
+    if (!moveCustomAxis(AXIS_RA, TrackRateNP[AXIS_RA].getValue()) ||
+            !moveCustomAxis(AXIS_DE, TrackRateNP[AXIS_DE].getValue()))
+    {
+        stopCustomTracking();
+        return false;
+    }
+
+    customTrackingActive = true;
+    customResumePending  = false;
+    customLastMove = std::chrono::steady_clock::now();
+    LOGF_DEBUG("Custom tracking at axis rates %.4f, %.4f arcsec/s.", customRate[AXIS_RA], customRate[AXIS_DE]);
+    return true;
+}
+
+// Stop the moves (unless a slew already did) and select the manual motion rate again, which :RA#/:RE# replaced.
+// The mount's own tracking stays off.
+bool LX200_OnStep::stopCustomTracking(bool halt)
+{
+    if (!isSimulation())
+    {
+        if (halt && HaltMovement(PortFD, LX200_ALL) < 0)
+        {
+            LOG_ERROR("Failed to stop custom tracking.");
+            return false;
+        }
+
+        // the next command flushes the port (flushIO), so the halt must have been sent
+        tcdrain(PortFD);
+
+        char cmd[CMD_MAX_LEN] = {0};
+        snprintf(cmd, sizeof(cmd), ":R%d#", std::max(0, SlewRateSP.findOnSwitchIndex()));
+        sendOnStepCommandBlind(cmd);
+        tcdrain(PortFD);
+    }
+
+    customDirection[AXIS_RA] = customDirection[AXIS_DE] = 0;
+    customRate[AXIS_RA] = customRate[AXIS_DE] = 0;
+    customTrackingActive = false;
+    LOG_DEBUG("Custom tracking stopped.");
+    return true;
+}
+
+// Move one axis at a signed rate in arcsec/s. Positive rates move west on the RA/Az axis (increasing hour angle,
+// or azimuth on an Alt-Az mount) and north on the Dec/Alt axis (increasing declination or altitude). OnStepX
+// moves the axis at exactly this rate, tracking is not added.
+bool LX200_OnStep::moveCustomAxis(INDI_EQ_AXIS axis, double rate)
+{
+    int direction = (rate > 0) - (rate < 0);
+    int positive  = (axis == AXIS_RA) ? LX200_WEST : LX200_NORTH;
+    int negative  = (axis == AXIS_RA) ? LX200_EAST : LX200_SOUTH;
+
+    if (isSimulation())
+    {
+        customDirection[axis] = direction;
+        customRate[axis] = rate;
+        return true;
+    }
+
+    // stop the move in the other direction
+    if (customDirection[axis] != 0 && customDirection[axis] != direction)
+    {
+        if (HaltMovement(PortFD, customDirection[axis] > 0 ? positive : negative) < 0)
+        {
+            LOGF_ERROR("Failed to stop the %s axis.", axis == AXIS_RA ? "RA/Az" : "DE/Alt");
+            return false;
+        }
+        // OnStepX doesn't answer the moves, and the next command flushes the port (flushIO)
+        tcdrain(PortFD);
+        customDirection[axis] = 0;
+        customRate[axis] = 0;
+    }
+
+    if (direction == 0)
+        return true;
+
+    // the move is sent with every rate: OnStepX applies a new rate to a new move, and restarts its time limit
+    double degrees = std::fabs(rate) / 3600.0;
+    int rc = (axis == AXIS_RA) ? setRAAzSlewRate(PortFD, degrees) : setDecAltSlewRate(PortFD, degrees);
+    if (rc < 0 || MoveTo(PortFD, direction > 0 ? positive : negative) < 0)
+    {
+        LOGF_ERROR("Failed to move the %s axis.", axis == AXIS_RA ? "RA/Az" : "DE/Alt");
+        return false;
+    }
+    tcdrain(PortFD);
+
+    customDirection[axis] = direction;
+    customRate[axis] = rate;
+    return true;
+}
+
+// OnStepX refuses a goto or park until the axes have slowed down to a stop ([g]uide active in :GU#)
+bool LX200_OnStep::waitForCustomMovesToEnd()
+{
+    if (isSimulation())
+        return true;
+
+    const struct timespec pause = {0, 100000000L};
+    for (int i = 0; i < 300; i++)
+    {
+        char status[RB_MAX_LEN] = {0};
+        if (getCommandSingleCharErrorOrLongResponse(PortFD, status, ":GU#") > 1 && !strchr(status, 'g'))
+            return true;
+        if (i == 10)
+            LOG_INFO("Waiting for the axes to stop...");
+        nanosleep(&pause, nullptr);
+    }
+
+    LOG_ERROR("The axes did not stop.");
+    return false;
+}
+
+// Called by ReadScopeStatus once TrackState has been read from :GU#
+void LX200_OnStep::updateCustomTracking()
+{
+    // a slew or park started elsewhere (a hand controller, another client) ends the moves
+    if (customTrackingActive &&
+            (TrackState == SCOPE_SLEWING || TrackState == SCOPE_PARKING || TrackState == SCOPE_PARKED))
+    {
+        LOG_WARN("The mount is slewing, custom tracking stopped.");
+        stopCustomTracking(false);
+        customResumePending = (TrackState == SCOPE_SLEWING);
+    }
+
+    // custom tracking resumes when a slew completes and the mount tracks
+    if (customResumePending && TrackState != SCOPE_SLEWING)
+    {
+        customResumePending = false;
+        if (TrackState == SCOPE_TRACKING && TrackModeSP.findOnSwitchIndex() == TRACK_CUSTOM && !startCustomTracking())
+            LOG_ERROR("Failed to resume custom tracking.");
+        return;
+    }
+
+    if (!customTrackingActive)
+        return;
+
+    // the mount's own tracking is off while it follows the axis rates
+    if (TrackState == SCOPE_TRACKING && !setMountTracking(false))
+        LOG_WARN("Failed to switch the mount's tracking off.");
+    TrackState = SCOPE_TRACKING;
+    OnstepStatTP[1].setText("Custom tracking");
+
+    // OnStepX doesn't answer the moves; a move it refused (a limit, for example) leaves the [g]uide flag off
+    bool moving = strchr(OSStat, 'g') != nullptr;
+    if (!moving && (customDirection[AXIS_RA] != 0 || customDirection[AXIS_DE] != 0) && !customStallWarned &&
+            std::chrono::steady_clock::now() - customLastMove >= std::chrono::seconds(1))
+    {
+        LOG_WARN("The mount is not moving the axes for custom tracking. Check the mount's limits.");
+        customStallWarned = true;
+    }
+    if (moving)
+        customStallWarned = false;
+
+    if (std::chrono::steady_clock::now() - customLastMove >= ONSTEP_CUSTOM_MOVE_REFRESH)
+    {
+        customLastMove = std::chrono::steady_clock::now();
+        if (!moveCustomAxis(AXIS_RA, customRate[AXIS_RA]) || !moveCustomAxis(AXIS_DE, customRate[AXIS_DE]))
+            LOG_WARN("Failed to send the custom tracking moves again.");
+    }
 }
 
 void LX200_OnStep::slewError(int slewCode)
@@ -5313,6 +5565,12 @@ bool LX200_OnStep::Goto(double ra, double dec)
     fs_sexa(RAStr, targetRA, 2, fracbase);
     fs_sexa(DecStr, targetDEC, 2, fracbase);
 
+    // the mount slews and tracks by itself, custom tracking resumes when the slew completes
+    bool resumeCustom = customTrackingActive || customResumePending;
+    customResumePending = false;
+    if (customTrackingActive && !(stopCustomTracking() && waitForCustomMovesToEnd()))
+        return false;
+
     // If moving, let's stop it first.
     if (EqNP.getState() == IPS_BUSY)
     {
@@ -5369,6 +5627,8 @@ bool LX200_OnStep::Goto(double ra, double dec)
     //OnStep: DON'T set TrackState, this may resolve issues with the autoalign, this is updated by the status updates.
     //     TrackState = SCOPE_SLEWING;
     //EqNP.s     = IPS_BUSY;
+
+    customResumePending = resumeCustom && TrackModeSP.findOnSwitchIndex() == TRACK_CUSTOM;
 
     LOGF_INFO("Slewing to RA: %s - DEC: %s", RAStr, DecStr);
 
@@ -5514,6 +5774,13 @@ void LX200_OnStep::initSlewRates()
 
 bool LX200_OnStep::MoveNS(INDI_DIR_NS dir, TelescopeMotionCommand command)
 {
+    // the moves use the custom tracking rates, and stopping one would stop custom tracking
+    if (customTrackingActive)
+    {
+        LOG_WARN("Manual motion is not available while custom tracking. Switch tracking off first.");
+        return false;
+    }
+
     if (command == MOTION_START)
     {
         if (MovementWESP.getState() != IPS_BUSY && m_RememberPollingPeriod == 0)
@@ -5535,6 +5802,13 @@ bool LX200_OnStep::MoveNS(INDI_DIR_NS dir, TelescopeMotionCommand command)
 
 bool LX200_OnStep::MoveWE(INDI_DIR_WE dir, TelescopeMotionCommand command)
 {
+    // the moves use the custom tracking rates, and stopping one would stop custom tracking
+    if (customTrackingActive)
+    {
+        LOG_WARN("Manual motion is not available while custom tracking. Switch tracking off first.");
+        return false;
+    }
+
     if (command == MOTION_START)
     {
         if (MovementNSSP.getState() != IPS_BUSY && m_RememberPollingPeriod == 0)
