@@ -24,6 +24,7 @@
 
     ===========================================
 
+    Version 1.28: Custom track mode with signed axis rates (OnStepX).
     Version 1.26: Fix issues due to migration to new INDI properties.
     Version 1.25: Refactor driver to use INDI new properties.
     Version 1.24: During manual slew, only send back RA & DE.
@@ -153,6 +154,7 @@
 #include "indipropertyswitch.h"
 #include "indipropertynumber.h"
 
+#include <chrono>
 #include <cstring>
 #include <unistd.h>
 #include <termios.h>
@@ -194,6 +196,9 @@ class LX200_OnStep : public LX200Generic, public INDI::WeatherInterface, public 
         virtual bool SetCurrentPark() override;
         virtual bool SetDefaultPark() override;
         virtual bool SetTrackEnabled(bool enabled) override;
+        virtual bool SetTrackMode(uint8_t mode) override;
+        virtual bool Abort() override;
+        virtual bool Disconnect() override;
         virtual bool updateLocation(double latitude, double longitude, double elevation) override;
         virtual bool setLocalDate(uint8_t days, uint8_t months, uint16_t years) override;
         virtual bool ReadScopeStatus() override;
@@ -448,4 +453,20 @@ class LX200_OnStep : public LX200Generic, public INDI::WeatherInterface, public 
     private:
         int currentCatalog;
         int currentSubCatalog;
+
+        // Custom tracking (OnStepX) moves both axes at the signed TELESCOPE_TRACK_RATE axis rates with :RA#/:RE#
+        // and the :M# moves, with the mount's own tracking switched off.
+        bool customTrackingSupported();
+        bool startCustomTracking();
+        bool stopCustomTracking(bool halt = true);
+        bool moveCustomAxis(INDI_EQ_AXIS axis, double rate);
+        bool waitForCustomMovesToEnd();
+        void updateCustomTracking();
+        bool setMountTracking(bool enabled);
+        bool customTrackingActive {false};
+        bool customResumePending {false};      // resume custom tracking when the slew completes
+        bool customStallWarned {false};
+        int customDirection[2] {0, 0};         // move in progress on each axis: -1, 0 or 1
+        double customRate[2] {0, 0};           // axis rates sent to the mount, arcsec/s
+        std::chrono::steady_clock::time_point customLastMove;
 };

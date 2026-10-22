@@ -294,6 +294,10 @@ int abortSlew(int fd);
 int MoveTo(int fd, int direction);
 /* Halt movement in a particular direction */
 int HaltMovement(int fd, int direction);
+/* Set the rate of the east/west moves (RA/Az axis) in degrees per second */
+int setRAAzSlewRate(int fd, double rate);
+/* Set the rate of the north/south moves (Dec/Alt axis) in degrees per second */
+int setDecAltSlewRate(int fd, double rate);
 /* Select the tracking mode */
 int selectTrackingMode(int fd, int trackMode);
 /* Is Slew complete? 0 if complete, 1 if in progress, otherwise return an error */
