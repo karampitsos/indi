@@ -970,7 +970,7 @@ bool CelestronDriver::is_slewing(bool *slewing)
 
 bool CelestronDriver::get_track_mode(CELESTRON_TRACK_MODE *mode)
 {
-    set_sim_response("\02#");
+    set_sim_response("%c#", sim_data.trackMode);
 
     if (!send_command("t", 1, response, 2, true, false))
         return false;
@@ -1068,6 +1068,27 @@ bool CelestronDriver::set_track_rate(CELESTRON_TRACK_RATE rate, CELESTRON_TRACK_
     }
     char payload[] = {static_cast<char>(rate >> 8 & 0xff), static_cast<char>(rate & 0xff)};
     return send_passthrough(CELESTRON_DEV_RA, cmd, payload, 2, response, 0);
+}
+
+// set a signed variable rate in arcsec/s on one motor
+bool CelestronDriver::set_axis_rate(int dev, double rate)
+{
+    if (std::fabs(rate) > CELESTRON_MAX_CUSTOM_RATE)
+    {
+        LOGF_WARN("Axis rate %.1f arcsec/s exceeds the mount limit, clamped to %.0f.", rate, CELESTRON_MAX_CUSTOM_RATE);
+        rate = std::copysign(CELESTRON_MAX_CUSTOM_RATE, rate);
+    }
+
+    set_sim_response("#");
+    char cmd = rate >= 0 ? MC_SET_POS_GUIDERATE : MC_SET_NEG_GUIDERATE;
+    uint16_t value = static_cast<uint16_t>(std::lround(std::fabs(rate) * 4));
+    char payload[] = {static_cast<char>(value >> 8 & 0xff), static_cast<char>(value & 0xff)};
+    return send_passthrough(dev, cmd, payload, 2, response, 0);
+}
+
+bool CelestronDriver::set_custom_track_rate(double primaryRate, double secondaryRate)
+{
+    return set_axis_rate(CELESTRON_DEV_RA, primaryRate) && set_axis_rate(CELESTRON_DEV_DEC, secondaryRate);
 }
 
 // focuser commands

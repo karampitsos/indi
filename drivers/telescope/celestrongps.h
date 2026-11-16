@@ -90,6 +90,7 @@ class CelestronGPS : public INDI::Telescope, public INDI::GuiderInterface, publi
         // Tracking
         virtual bool SetTrackMode(uint8_t mode) override;
         virtual bool SetTrackEnabled(bool enabled) override;
+        virtual bool SetTrackRate(double raRate, double deRate) override;
 
         // Parking
         virtual bool Park() override;
@@ -114,8 +115,9 @@ class CelestronGPS : public INDI::Telescope, public INDI::GuiderInterface, publi
         IText FirmwareT[7] {};
         ITextVectorProperty FirmwareTP;
 
-        //INumberVectorProperty HorizontalCoordsNP;
-        //INumber HorizontalCoordsN[2];
+        // Current Az/Alt reported by the mount
+        INDI::PropertyNumber HorizontalCoordsNP {2}; // AZ, ALT
+        bool canGetAzAlt {false};
 
         //ISwitch TrackS[4];
         //ISwitchVectorProperty TrackSP;
@@ -155,6 +157,19 @@ class CelestronGPS : public INDI::Telescope, public INDI::GuiderInterface, publi
     private:
         bool setCelestronTrackMode(CELESTRON_TRACK_MODE mode);
         bool checkMinVersion(double minVersion, const char *feature, bool debug = false);
+
+        // Custom tracking drives both motors at the TELESCOPE_TRACK_RATE axis rates
+        // with the mount's own tracking switched off.
+        bool startCustomTracking();
+        bool stopCustomTracking();
+        bool customTrackingActive {false};
+
+        // Simulated axis positions, the Alt-Az simulation integrates the custom rates on them
+        double simAz {0}, simAlt {0};
+        INDI::PropertySwitch SimTrackModeSP {3}; // Alt Az, EQ N, EQ S
+        INDI::IGeographicCoordinates simObserver();
+        void simAxesFromRaDec();
+
         void checkAlignment();
 
         double currentRA, currentDEC, currentAZ, currentALT;
